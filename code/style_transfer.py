@@ -23,7 +23,6 @@ class Model(object):
         dim_emb = args.dim_emb
         n_layers = args.n_layers
         max_len = args.max_seq_length
-        gamma = args.gamma
 
         self.dropout = tf.placeholder(tf.float32,
             name='dropout')
@@ -31,6 +30,8 @@ class Model(object):
             name='learning_rate')
         self.rho = tf.placeholder(tf.float32,
             name='rho')
+        self.gamma = tf.placeholder(tf.float32,
+            name='gamma')
 
         self.batch_len = tf.placeholder(tf.int32,
             name='batch_len')
@@ -95,7 +96,8 @@ class Model(object):
 
         #####   feed-previous decoding   #####
         go = dec_inputs[:,0,:]
-        soft_func = softmax_word(self.dropout, proj_W, proj_b, embedding, gamma)
+        soft_func = softsample_word(self.dropout, proj_W, proj_b, embedding,
+            self.gamma)
         hard_func = argmax_word(self.dropout, proj_W, proj_b, embedding)
 
         soft_h_ori, soft_logits_ori = rnn_decode(h_ori, go, max_len,
@@ -142,7 +144,7 @@ def rewrite(model, sess, args, vocab, batch):
     logits_ori, logits_tsf, loss, loss_g, loss_d, loss_d0, loss_d1 = sess.run(
         [model.hard_logits_ori, model.hard_logits_tsf,
          model.loss, model.loss_g, model.loss_d, model.loss_d0, model.loss_d1],
-         feed_dict=feed_dictionary(model, batch, args.rho))
+         feed_dict=feed_dictionary(model, batch, args.rho, args.gamma_min))
 
     ori = np.argmax(logits_ori, axis=2).tolist()
     ori = [[vocab.id2word[i] for i in sent] for sent in ori]
@@ -227,12 +229,16 @@ if __name__ == '__main__':
             losses = Losses(args.steps_per_checkpoint)
             best_dev = float('inf')
             learning_rate = args.learning_rate
+            rho = args.rho
+            gamma = args.gamma_init
 
             for epoch in range(1, 1+args.max_epochs):
                 print '--------------------epoch %d--------------------' % epoch
+                print 'learning_rate:', learning_rate, '  rho:', rho, \
+                    '  gamma:', gamma
 
                 for batch in batches:
-                    feed_dict = feed_dictionary(model, batch, args.rho,
+                    feed_dict = feed_dictionary(model, batch, rho, gamma,
                         args.dropout_keep_prob, learning_rate)
 
                     loss_d0, _ = sess.run([model.loss_d0, model.optimizer_d0],
@@ -268,7 +274,26 @@ if __name__ == '__main__':
                         print 'saving model...'
                         model.saver.save(sess, args.model)
 
+                gamma = max(args.gamma_min, gamma * args.gamma_decay)
+
         if args.test:
             test_losses = transfer(model, sess, args, vocab,
                 test0, test1, args.output)
             test_losses.output('test')
+
+        if args.online_testing:
+            while True:
+                sys.stdout.write('> ')
+                sys.stdout.flush()
+                inp = sys.stdin.readline().rstrip()
+                if inp == 'quit' or inp == 'exit':
+                    break
+                inp = inp.split()
+                y = int(inp[0])
+                sent = inp[1:]
+
+                batch = get_batch([sent], [y], vocab.word2id)
+                ori, tsf, _, _, _, _, _ = rewrite(model, sess,
+                    args, vocab, batch)
+                print 'original:', ' '.join(w for w in ori[0])
+                print 'transfer:', ' '.join(w for w in tsf[0])
